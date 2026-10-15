@@ -157,7 +157,8 @@ class Capabilities:
     providers: frozenset[str]
     schema: bool          # can send a JSON schema to the provider
     prices: bool          # can price a reply itself
-    http_client: bool     # accepts an injected httpx.Client, needed for the guard
+    http_client: bool     # accepts an injected HTTP client, needed for the guard
+    http_lib: str = "httpx"   # the library that client comes from; "httpx2" for the openai and anthropic SDKs
 
 class Backend(Protocol):
     capabilities: Capabilities
@@ -184,7 +185,7 @@ Rules an adapter follows:
 | Providers | `openai`, `openai_compatible`, `openrouter` | `anthropic` | everything LiteLLM lists | the provider to backend table |
 | Schema to provider | yes, `response_format` json_schema | yes, a forced tool carrying the schema | yes, `response_format` | validation into the class, always; the schema in the prompt when the flag is false |
 | Prices | no | no | yes, `response_cost` | the model's own `price`, then a small dated table for OpenAI and Anthropic models |
-| Injected HTTP client | yes | yes | no in version one | the guarded client |
+| Injected HTTP client | yes, an `httpx2.Client` | yes, an `httpx2.Client` | no in version one | the guarded client, built from the library the backend names |
 | Errors | SDK classes mapped | SDK classes mapped | LiteLLM classes mapped | `ErrorKind` and `ProviderError` |
 | Retries | off | off | off | the attempt loop |
 
@@ -312,7 +313,7 @@ Runs in `model()` when `base_url` is set and `public_only` is true, and again be
 
 1. The scheme must be `https`. No user info, query or fragment.
 2. Every resolved address must be public: not private, loopback, link-local, multicast, reserved, unspecified, or a cloud metadata address (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`).
-3. The adapter receives an `httpx.Client` with redirects off, `trust_env=False`, and a transport that connects to one checked address while keeping the host name for TLS and the `Host` header. A DNS change between check and call cannot reach a private address.
+3. The adapter receives a client from the HTTP library its SDK accepts (`capabilities.http_lib`: `httpx`, or `httpx2`, the fork the openai and anthropic SDKs bundle) with redirects off, `trust_env=False`, and a transport that connects to one checked address while keeping the host name for TLS and the `Host` header. A DNS change between check and call cannot reach a private address.
 4. With `public_only` false nothing is checked, so Ollama on `localhost` works.
 
 An adapter whose `capabilities.http_client` is false cannot be guarded, so `model()` raises `EndpointRefused` for that combination.
@@ -401,7 +402,7 @@ The LiteLLM adapter sets `LITELLM_LOCAL_MODEL_COST_MAP=True`, so LiteLLM reads t
 
 ## Testing
 
-- No test opens a network connection. Both native SDKs use httpx, so `respx` mocks their HTTP. LiteLLM's OpenAI and Anthropic paths also use httpx and are mocked the same way.
+- No test opens a network connection. The openai and anthropic SDKs send through their bundled `httpx2`, which `respx` cannot see, so their tests either inject a mock `httpx2` transport or patch `httpx2.HTTPTransport.handle_request` to serve scripted responses and fail on anything else. LiteLLM uses `httpx`, so `respx` mocks it directly.
 - `tests/contract/` drives every backend, including `FakeBackend`, through one scenario set: success with usage, success without usage, rate limit then success, auth error with a store key then success after re-fetch, auth error with a string key, server error until attempts run out, invalid output then valid, custom base URL refused under `public_only`, key absent from every exception message and from `repr`.
 - Unit tests per module: `guard` against a table of URLs and addresses, `hygiene` against messages that embed the key in several encodings, `retry` with a fake clock, `tags` across nested contexts and asyncio tasks, `schema` prompt and parse, `prices` order, `report` aggregation.
 - The secret stores are tested against mocked SDK clients.

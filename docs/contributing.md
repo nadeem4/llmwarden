@@ -5,7 +5,7 @@ Read [architecture.md](architecture.md) first. It is the design, and it names th
 ## Rules
 
 - **Test first.** Write the failing test, watch it fail, write the least code that passes, then refactor. No production code without a test that needed it.
-- **No test touches the network.** Every HTTP call is mocked with `respx`. Secret store SDKs are mocked at the client. A test that needs a real key is wrong.
+- **No test touches the network.** LiteLLM traffic is mocked with `respx`. The openai and anthropic SDKs send through their bundled `httpx2`, which `respx` cannot see: patch `httpx2.HTTPTransport.handle_request` (or inject an `httpx2.MockTransport`) and make the patch raise on any request your script did not expect. Secret store SDKs are mocked at the client. A test that needs a real key is wrong.
 - **Keys never leave the call path.** A key goes to `Backend.client()` and nowhere else. Never log it, never put it in an error, never use it as a cache key, never let a test assertion print it on failure.
 - **Thin adapters.** A backend translates requests, replies and errors and declares `Capabilities`. It never retries, records, scrubs, validates a schema or prices a call. If you are writing any of those inside `backends/`, stop.
 - **One job per module.** Each file in `src/llmwarden/` depends on `types.py` plus what the module table in the architecture names. Do not add a dependency the table does not list.
