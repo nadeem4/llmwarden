@@ -1,6 +1,6 @@
 # llmwarden architecture
 
-> **Status: design approved on 2026-10-15, implementation in progress.** This document is the design. It replaces the earlier proposal, whose findings about LiteLLM and the openai SDK are kept under [Evidence](#evidence). Working rules for contributors are in [contributing.md](contributing.md).
+> **Status: version one implemented, 2026-10-15.** This document is the design the code follows. The earlier proposal's findings about LiteLLM and the openai SDK are kept under [Evidence](#evidence). Working rules for contributors are in [contributing.md](contributing.md); what shipped is in the [CHANGELOG](../CHANGELOG.md).
 
 ## Purpose
 
@@ -18,14 +18,14 @@ One Python package that every application uses to call language models. A backen
 | Request shape | A list of messages, with `system` and `user` as sugar for the common case. Optional Pydantic `schema`. A `tools` field is reserved and rejected until implemented. |
 | Keys per request | Creating a model with a plain-string key is cheap and leaks nothing, because the HTTP client is shared per backend. Bring-your-own-key hosting is a first-class use. |
 | Sync first | `complete` only. Streaming, async and embeddings follow in a later version as new protocol methods with capability flags. |
-| Consumers | Pandion and nl2sql adopt the package after version one ships. They do not shape version one beyond the constraints below. |
+| Applications | Existing applications adopt the package after version one ships. They do not shape version one beyond the requirements below. |
 
-### Constraints taken from the first consumers
+### Requirements that shaped version one
 
-- Pandion is synchronous, single-turn and hosted with each end user's own key supplied per request. It guards custom endpoints with `public_only`.
-- Pandion calls Anthropic beta features (adaptive thinking, server-side fallbacks). The Anthropic adapter passes unknown provider parameters through `params` untouched.
-- nl2sql needs structured output into Pydantic classes. It does not use tool calling or streaming.
-- Both run on CPython 3.12 or 3.13.
+- A hosted application where each end user supplies their own key per request, and types a custom endpoint that must be guarded with `public_only`.
+- An application that uses Anthropic beta features (adaptive thinking, server-side fallbacks). The Anthropic adapter passes unknown provider parameters through `params` untouched.
+- A multi-agent pipeline that needs structured output into Pydantic classes, synchronously, without tool calling or streaming.
+- CPython 3.12 and 3.13.
 
 ## Scope of version one
 
@@ -38,25 +38,27 @@ One Python package that every application uses to call language models. A backen
 ```python
 import llmwarden as lw
 
-lw.secrets.use(lw.stores.AwsSecrets(region="us-east-1"))      # optional, at startup
+lw.secrets.use(lw.stores.AwsSecrets(region="us-east-1"))  # optional, at startup
 
-m = lw.model("anthropic/claude-sonnet-5-5",
-             api_key=lw.secret("aws", "prod/llm", field="anthropic"),
-             params={"max_tokens": 1024},
-             retry=lw.Retry(attempts=3),
-             fallback=lw.model("openai/gpt-5.4"))
+m = lw.model(
+    "anthropic/claude-sonnet-5-5",
+    api_key=lw.secret("aws", "prod/llm", field="anthropic"),
+    params={"max_tokens": 1024},
+    retry=lw.Retry(attempts=3),
+    fallback=lw.model("openai/gpt-5.4"),
+)
 
 with lw.tags(request="q-1842", customer="acme"):
     reply = m.complete(system="Rank these.", user=text, schema=Ranking, tags={"step": "rerank"})
 
-reply.parsed      # Ranking
-reply.text        # raw text
-reply.usage       # Usage(input_tokens, output_tokens, source)
-reply.cost        # Cost(usd, source) or None
-reply.attempts    # 2, when the first attempt was retried
+reply.parsed  # Ranking
+reply.text  # raw text
+reply.usage  # Usage(input_tokens, output_tokens, source)
+reply.cost  # Cost(usd, source) or None
+reply.attempts  # 2, when the first attempt was retried
 
 lw.report(group_by=["customer", "step"])
-lw.observe.add(my_sink)                                      # def my_sink(record: AttemptRecord) -> None
+lw.observe.add(my_sink)  # def my_sink(record: AttemptRecord) -> None
 ```
 
 ## The public API
@@ -409,6 +411,8 @@ The LiteLLM adapter sets `LITELLM_LOCAL_MODEL_COST_MAP=True`, so LiteLLM reads t
 - Tests run on CPython 3.12 and 3.13 in GitHub Actions.
 
 ## Build order
+
+Version one was built in this order. A new adapter or store follows the same pattern: tests first, then the module, then the contract suite.
 
 1. Tooling: pyproject, ruff, mypy, pytest, GitHub Actions.
 2. `types.py`, `backends/base.py`, `backends/fake.py`, and the contract suite running against `FakeBackend`.

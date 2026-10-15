@@ -25,10 +25,10 @@ Every project ends up rewriting the same layer. llmwarden is that layer, written
 ```python
 import llmwarden as lw
 
-fast = lw.model("groq/llama-3.3-70b-versatile",
-                api_key=lw.secret("aws", "prod/llm", field="groq_key"))
-strong = lw.model("anthropic/claude-sonnet-5-5",
-                  api_key=lw.secret("env", "ANTHROPIC_API_KEY"))
+fast = lw.model(
+    "groq/llama-3.3-70b-versatile", api_key=lw.secret("aws", "prod/llm", field="groq_key")
+)
+strong = lw.model("anthropic/claude-sonnet-5-5", api_key=lw.secret("env", "ANTHROPIC_API_KEY"))
 
 reply = fast.complete(system="Rewrite the question.", user=question)
 ```
@@ -64,7 +64,7 @@ With `public_only=True`, meant for hosted apps that strangers use:
 ```python
 with lw.tags(request="q-1842", customer="acme"):
     plan = planner.complete(..., tags={"agent": "planner"})
-    sql = writer.complete(..., tags={"agent": "sql_writer"})
+    draft = writer.complete(..., tags={"agent": "writer"})
 
 lw.report(group_by=["customer", "agent"])
 ```
@@ -113,9 +113,24 @@ pip install "llmwarden[all]"             # everything
 
 Python 3.12 or newer.
 
+## Examples
+
+Runnable scripts in [examples/](examples/), each a few lines with the setup it needs at the top:
+
+| File | Shows |
+|---|---|
+| [01_quickstart.py](examples/01_quickstart.py) | one model, one call, usage and cost on the reply |
+| [02_structured_output.py](examples/02_structured_output.py) | a Pydantic schema validated on every backend, retried on bad output |
+| [03_secret_stores.py](examples/03_secret_stores.py) | a cloud store, a field inside a JSON secret, rotation, a store of your own |
+| [04_hosted_app_custom_endpoint.py](examples/04_hosted_app_custom_endpoint.py) | one model per request with the user's key, a guarded user-typed base URL, scrubbed errors |
+| [05_cost_report.py](examples/05_cost_report.py) | tags, every attempt recorded, a report by customer and agent, your own sink, OpenTelemetry |
+| [06_testing_your_app.py](examples/06_testing_your_app.py) | testing your code offline with `FakeBackend` |
+
+The last three run without a key or a network; the test suite runs them.
+
 ## Who it is for
 
-Anyone shipping an application with more than one model call, especially one that is hosted for other people. It starts as the shared layer for two projects, [RAG Playground](https://github.com/nadeem4/rag-playground) and [nl2sql](https://github.com/nadeem4/nl2sql), which each built their own version of it.
+Anyone shipping an application with more than one model call, especially one that is hosted for other people: retrieval pipelines, multi-agent systems, and tools where users bring their own key or point at their own server.
 
 ## Developing
 
@@ -124,10 +139,9 @@ uv sync --group dev
 uv run pytest
 ```
 
-Every test runs without a network connection. See [docs/contributing.md](docs/contributing.md).
+Every test runs without a network connection. See [docs/contributing.md](docs/contributing.md) for the working rules and [docs/releasing.md](docs/releasing.md) for how a version reaches PyPI.
 
 ## Next steps
 
 1. Release 0.1.0 to PyPI.
-2. Move RAG Playground's Pandion package onto it, then nl2sql.
-3. Streaming, async and tool calling, as additions to the same interface.
+2. Streaming, async and tool calling, as additions to the same interface.
