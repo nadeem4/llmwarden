@@ -7,7 +7,8 @@
 - One place where an application states, for each stage, which model, provider, key and endpoint it uses.
 - Secrets fetched by reference from any store, never written into config, logs or errors.
 - Safe custom endpoints on hosted apps.
-- Usage and cost per stage.
+- Structured output as validated Pydantic objects, and streaming, the same on every provider.
+- Cost per run, per stage and per attempt, so retries are never hidden.
 - Provider calls delegated to an existing multi-provider library, which can be swapped.
 
 ## Non-goals
@@ -15,7 +16,8 @@
 - Writing a client for each provider.
 - Running as a proxy or gateway server.
 - Deciding what an application's stages are or how they run.
-- Retries, fallbacks and load balancing across providers. The backend library may offer these; llmwarden does not add its own.
+- Load balancing across providers or keys.
+- Storing cost records or deciding whether a run met its goal. The application does both; llmwarden hands it the records.
 
 ## Components
 
@@ -28,7 +30,7 @@ flowchart TB
         Secrets["Secret resolver<br/>${provider:path}"]
         Guard["Endpoint guard<br/>public_only"]
         Hygiene["Key hygiene<br/>scrub and mask"]
-        Meter["Usage meter<br/>tokens and cost per stage"]
+        Meter["Cost ledger<br/>every attempt, per run and stage"]
         Port["Backend interface"]
     end
     subgraph Stores["Secret providers"]
@@ -132,9 +134,77 @@ warden = Warden.from_yaml("models.yaml", backend="any-llm")
 - `repr` and `str` of settings mask literal keys and show references as written.
 - A logging filter is provided that scrubs any resolved secret from log records.
 
-### Usage meter
+### Structured output
 
-Each call records the stage, model, token counts and cost. `warden.usage.by_stage()` sums them. An unknown count or price stays `None` and is shown as unknown, never as zero.
+`complete` takes an optional Pydantic class and returns a validated instance of it:
+
+```python
+class Ranking(BaseModel):
+    order: list[int]
+
+reply = warden.complete("rerank", system=..., user=..., schema=Ranking)
+reply.parsed      # a Ranking
+reply.text        # the raw JSON the model returned
+```
+
+- The schema is passed to the backend, which asks the provider for JSON that matches it where the provider supports that (LiteLLM: `response_format` accepts a Pydantic class, and `supports_response_schema(model)` says which models do).
+- **llmwarden always validates the reply itself** with `model_validate_json`, whatever the backend did. The result is the same on every backend and every provider, including ones without schema support, where the schema is described in the prompt instead.
+- A reply that fails validation can be retried (see Retries below). If every attempt fails, `complete` raises `InvalidOutput` with the last raw text attached.
+
+### Streaming
+
+`stream` is a separate method, so `complete` stays simple:
+
+```python
+for chunk in warden.stream("answer", system=..., user=...):
+    print(chunk.text, end="")
+reply = chunk.final   # on the last chunk: full text, usage and cost
+```
+
+- Async versions: `acomplete` and `astream`.
+- Usage is asked for on every stream (LiteLLM: `stream_options={"include_usage": True}`). A provider that does not report it while streaming leaves the counts unknown.
+- `schema` is not accepted with `stream`. Structured output is validated on the whole reply.
+
+### Retries
+
+llmwarden runs retries itself and turns off the backend's own (LiteLLM: `num_retries=0`), so that **every attempt is seen and recorded**. Hidden retries inside a backend would cost money that no report shows.
+
+Each stage has a retry policy: how many attempts, which failures to retry (rate limit, timeout, server error, invalid output), and the wait between attempts. A retry can also move to a fallback model named in the stage's settings.
+
+### Cost ledger
+
+Every attempt is one record:
+
+| Field | Meaning |
+|---|---|
+| `run_id` | The application's own id for one unit of work, such as one question answered |
+| `stage` | The stage name |
+| `attempt` | 1 for the first try, 2 for the first retry, and so on |
+| `model` | The model actually called, which differs from the stage's on a fallback |
+| `outcome` | `ok`, `provider_error`, `invalid_output` or `cancelled` |
+| `input_tokens`, `output_tokens` | As reported, or `None` |
+| `cost` | From the price table, or `None` when a count or price is unknown |
+| `seconds` | Wall-clock time of the attempt |
+
+An application groups attempts into a run:
+
+```python
+with warden.run(run_id="q-1842") as run:
+    answer_question(...)          # every stage call inside is recorded
+run.succeeded()                   # the application says whether the run met its goal
+
+run.cost()
+# total:     0.0213
+# useful:    0.0181   attempts whose outcome was ok
+# wasted:    0.0032   failed attempts that still used tokens
+# unknown:   1 attempt with no usage reported
+# by stage:  rewrite 0.0009, rerank 0.0047, answer 0.0157
+```
+
+- **Failed attempts are counted.** A rate-limit or connection error usually returns no usage and costs nothing, so it shows as unknown, not zero. A reply that came back but failed validation did use tokens, and its cost is counted as wasted.
+- **Success is the application's call.** llmwarden knows whether each call returned something valid. Only the application knows whether the run did its job (the question was answered, the SQL ran), so it marks that with `run.succeeded()` or `run.failed(reason)`.
+- **Storage is the application's call too.** The ledger is in memory. `run.records()` returns the rows, and an optional sink (a callback) receives each one as it is written, so an application can send them to its own database, log or billing system.
+- **Prices** come from the stage's `price` override when set, else from the backend's price table (LiteLLM: `completion_cost`). The report says which table and when it was last updated.
 
 ## One call, step by step
 
@@ -176,6 +246,5 @@ sequenceDiagram
 ## Open questions
 
 1. **Provider-specific features.** Some features, such as Claude's native citations, need request shapes that a general backend may not pass through. Should a stage be able to ask for the raw provider client, with the key still resolved and guarded by llmwarden?
-2. **Streaming and async.** Both are needed eventually. Should the first version include them, or ship sync only?
-3. **Price table.** Use the backend's table only, or keep a small table of our own with an "as of" date?
-4. **Secret cache lifetime.** Is the life of the process the right default, or should keys expire, for rotation?
+2. **First version scope.** Sync `complete` with `schema` and the cost ledger first, then `stream` and the async methods? Or all four together?
+3. **Secret cache lifetime.** Is the life of the process the right default, or should keys expire, for rotation?

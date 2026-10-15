@@ -65,9 +65,13 @@ With `public_only=True`, which is meant for hosted apps that strangers use:
 - Every provider error is re-raised as a fresh error with the key scrubbed and the original exception chain dropped, so the key cannot appear in a traceback.
 - Printing a config masks literal secrets and shows references as written.
 
-### 5. Usage and cost per stage
+### 5. Cost per run, with nothing hidden
 
-Every call returns token usage in one shape, tagged with its stage. Cost is worked out from a price table you can override. When a price or a count is unknown, it is reported as unknown, never as zero.
+Every attempt is recorded, retries included: its stage, model, outcome, tokens and cost. Group calls into a run, such as one question answered, and see the total, what was spent on attempts that worked, what was wasted on retries, and the split by stage. Retries happen inside llmwarden, never hidden inside a provider library, so none go uncounted. When a price or a count is unknown, it is reported as unknown, never as zero. Your application decides what counts as a successful run and where the records are stored.
+
+### 6. Structured output and streaming, the same everywhere
+
+Pass a Pydantic class and get back a validated object, on every provider, because llmwarden validates the reply itself. Stream a reply and still get its usage and cost at the end.
 
 ## How it will be used
 
