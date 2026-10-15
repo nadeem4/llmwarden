@@ -92,7 +92,7 @@ The application names its stages. llmwarden resolves each stage's settings and s
 
 ## What it is not
 
-- **Not another provider client.** Calls go through an existing multi-provider library behind a small backend interface, so the provider list stays current without this package rewriting it. The backend can be swapped.
+- **Not another provider client.** Calls go through an existing provider library behind one small interface, so the provider list stays current without this package rewriting it. Wherever that library already does something well, such as mapping errors or pricing a call, llmwarden uses it. It fills in only what is missing. Two backends ship from the start, a full multi-provider one and a light one for any OpenAI-compatible server, and you can write your own in one file.
 - **Not a proxy or gateway server.** It is a library inside your application.
 - **Not an agent framework.** It does not decide what your stages are or in what order they run.
 
