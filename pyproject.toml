@@ -1,6 +1,6 @@
 [project]
 name = "llmwarden"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Call any model with any key, fetched safely from wherever you keep secrets, and see exactly where your money goes"
 readme = "README.md"
 license = "MIT"

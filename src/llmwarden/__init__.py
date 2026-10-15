@@ -22,6 +22,8 @@ or opentelemetry. Those load inside the module that uses them.
 Build order and the full design: ``docs/architecture.md``.
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 from llmwarden import backends, observe, secrets, stores
 from llmwarden.model import Model, model
 from llmwarden.observe.records import AttemptRecord
@@ -44,7 +46,10 @@ from llmwarden.types import (
     Usage,
 )
 
-__version__ = "0.1.0.dev0"
+try:
+    __version__ = version("llmwarden")
+except PackageNotFoundError:  # running from a source tree that was never installed
+    __version__ = "0.0.0"
 
 __all__ = [
     "AttemptRecord",

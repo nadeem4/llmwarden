@@ -2,7 +2,7 @@
 
 Call any model with any key, fetched safely from wherever you keep secrets, and see exactly where your money goes and which requests fail.
 
-> **Status: 0.1.0 in development.** The core, the three backends, the five secret stores, the endpoint guard, key hygiene, recorded retries, tags, reports and the OpenTelemetry sink are implemented and covered by a contract test suite that runs the same scenarios against every backend. Not on PyPI yet. The design is in [docs/architecture.md](docs/architecture.md), the working rules in [docs/contributing.md](docs/contributing.md), and what shipped in [CHANGELOG.md](CHANGELOG.md).
+> **Status: 0.1.0 released.** The core, the three backends, the five secret stores, the endpoint guard, key hygiene, recorded retries, tags, reports and the OpenTelemetry sink are implemented and covered by a contract test suite that runs the same scenarios against every backend. Install it with `pip install "llmwarden[openai]"`. The design is in [docs/architecture.md](docs/architecture.md), the working rules in [docs/contributing.md](docs/contributing.md), and what shipped in [CHANGELOG.md](CHANGELOG.md).
 
 ## The problem
 
@@ -143,5 +143,4 @@ Every test runs without a network connection. See [docs/contributing.md](docs/co
 
 ## Next steps
 
-1. Release 0.1.0 to PyPI.
-2. Streaming, async and tool calling, as additions to the same interface.
+Streaming, async and tool calling, as additions to the same interface.
