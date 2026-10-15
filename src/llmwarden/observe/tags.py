@@ -11,3 +11,27 @@ CPython before 3.14; callers use ``contextvars.copy_context().run``.
 
 Depends on: nothing in the package.
 """
+
+from __future__ import annotations
+
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from types import MappingProxyType
+
+_tags: ContextVar[Mapping[str, str]] = ContextVar("llmwarden_tags", default=MappingProxyType({}))
+
+
+def current() -> Mapping[str, str]:
+    return _tags.get()
+
+
+@contextmanager
+def tags(**kv: object) -> Iterator[None]:
+    merged = dict(_tags.get())
+    merged.update({k: str(v) for k, v in kv.items()})
+    token = _tags.set(MappingProxyType(merged))
+    try:
+        yield
+    finally:
+        _tags.reset(token)
