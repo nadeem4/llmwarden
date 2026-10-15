@@ -23,3 +23,33 @@ library callbacks or reads environment variables.
 
 Depends on: types, httpx (type only).
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
+
+import httpx
+
+from llmwarden.types import ChatReply, ChatRequest, Cost, ErrorKind
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    providers: frozenset[str]
+    schema: bool
+    prices: bool
+    http_client: bool
+
+
+@runtime_checkable
+class Backend(Protocol):
+    capabilities: Capabilities
+
+    def client(self, *, api_key: str, base_url: str | None, http: httpx.Client | None) -> Any: ...
+
+    def complete(self, client: Any, request: ChatRequest) -> ChatReply: ...
+
+    def error_kind(self, error: BaseException) -> ErrorKind: ...
+
+    def price(self, reply: ChatReply) -> Cost | None: ...
