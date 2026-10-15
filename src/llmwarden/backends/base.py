@@ -2,8 +2,9 @@
 
 ``Capabilities`` (frozen dataclass): ``providers: frozenset[str]``,
 ``schema: bool`` (can send a JSON schema natively), ``prices: bool`` (can price
-a reply), ``http_client: bool`` (accepts an injected ``httpx.Client``, required
-for the guard).
+a reply), ``http_client: bool`` (accepts an injected HTTP client, required for
+the guard), ``http_lib: str`` (the module that client comes from: ``httpx`` by
+default, ``httpx2`` for the openai and anthropic SDKs, which bundle their own).
 
 ``Backend`` (Protocol):
 
@@ -40,6 +41,9 @@ class Capabilities:
     schema: bool
     prices: bool
     http_client: bool
+    # The HTTP library the adapter's SDK accepts an injected client from. The
+    # openai and anthropic SDKs ship their own ``httpx2``; most others use ``httpx``.
+    http_lib: str = "httpx"
 
 
 @runtime_checkable

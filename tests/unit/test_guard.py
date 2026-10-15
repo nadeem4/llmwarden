@@ -138,3 +138,33 @@ def test_guarded_client_pins_ipv6_address(monkeypatch):
     with guarded_client("https://api.example.com/v1", ips) as client:
         client.get("https://api.example.com/v1/models")
     assert seen["host"] == "2606:2800:220:1:248:1893:25c8:1946"
+
+
+def test_guarded_client_can_be_built_from_httpx2(monkeypatch):
+    httpx2 = pytest.importorskip("httpx2")
+    seen = {}
+
+    def fake_handle_request(self, request):
+        seen["url"] = str(request.url)
+        seen["host"] = request.headers["host"]
+        seen["sni"] = request.extensions.get("sni_hostname")
+        return httpx2.Response(200)
+
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", fake_handle_request)
+    ips = [ipaddress.ip_address("93.184.216.34")]
+    with guarded_client("https://api.example.com/v1", ips, lib="httpx2") as client:
+        assert isinstance(client, httpx2.Client)
+        assert client.follow_redirects is False and client.trust_env is False
+        assert client.get("https://api.example.com/v1/models").status_code == 200
+    assert seen["url"].startswith("https://93.184.216.34/")
+    assert seen["host"] == "api.example.com" and seen["sni"] == "api.example.com"
+
+
+def test_capabilities_default_http_lib_is_httpx():
+    from llmwarden.backends.anthropic import AnthropicBackend
+    from llmwarden.backends.base import Capabilities
+    from llmwarden.backends.openai import OpenAIBackend
+
+    assert Capabilities(frozenset(), True, False, True).http_lib == "httpx"
+    assert OpenAIBackend.capabilities.http_lib == "httpx2"
+    assert AnthropicBackend.capabilities.http_lib == "httpx2"

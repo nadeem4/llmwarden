@@ -41,6 +41,7 @@ class AnthropicBackend:
         schema=True,
         prices=False,
         http_client=True,
+        http_lib="httpx2",
     )
 
     def client(self, *, api_key: str, base_url: str | None, http: httpx.Client | None) -> Any:
