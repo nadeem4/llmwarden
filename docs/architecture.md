@@ -4,38 +4,124 @@
 
 ## Goals
 
-- One place where an application states, for each stage, which model, provider, key and endpoint it uses.
-- Secrets fetched by reference from any store, never written into config, logs or errors.
-- Safe custom endpoints on hosted apps.
-- Structured output as validated Pydantic objects, and streaming, the same on every provider.
-- Cost per run, per stage and per attempt, so retries are never hidden.
-- Provider calls made by an existing library, which can be swapped.
-- **Nothing rebuilt that the backend already does well.** Where a backend provides a capability, llmwarden uses it. Where it does not, llmwarden supplies its own.
+- Create a model in code with its key, from a plain string, a function or a secret store, and call it.
+- Fetch keys once, cache the client, and handle key rotation without a restart.
+- Make custom endpoints safe on hosted apps.
+- Never let a key reach a traceback, a log or an application hook.
+- Record every attempt, retries included, with tokens, cost, outcome and the caller's tags, and emit it as OpenTelemetry.
+- Return structured output as validated Pydantic objects, and stream, the same on every provider.
+- **Rebuild nothing the backend already does well.** Where a backend provides a capability, llmwarden uses it. Where it does not, llmwarden supplies its own.
 
-## Non-goals
+## Scope
 
-- Writing a client for each provider.
-- Running as a proxy or gateway server.
-- Deciding what an application's stages are or how they run.
-- Load balancing across providers or keys.
-- Storing cost records or deciding whether a run met its goal. The application does both; llmwarden hands it the records.
+**In:** models created with a key; secret stores; client caching and rotation; the endpoint guard; key hygiene; `complete`, `stream` and `embed` with async versions; retries and a fallback model; tags, attempt records, OpenTelemetry spans and a simple report.
 
-## The facade
+**Out, and left to the application:**
+- Stages, agents, steps and pipelines, and which model each one uses.
+- Config files. An application that wants one builds models from its own config.
+- Deciding whether a request succeeded, budgets, and where records are stored.
+- Dashboards. OpenTelemetry tools already provide them.
+- Running as a proxy or gateway server, and load balancing across providers or keys.
 
-llmwarden is a facade. Applications talk to one interface, `Warden`. Behind it sits one **backend adapter**, which wraps a provider library.
+## Using it
+
+```python
+import llmwarden as lw
+
+# At startup: register the secret stores in use (env is built in).
+lw.secrets.use(lw.stores.AwsSecrets(region="us-east-1"))
+
+# Create models. The key is resolved and the client built here, then cached.
+fast = lw.model("groq/llama-3.3-70b-versatile",
+                api_key=lw.secret(store="aws", name="prod/llm", field="groq_key"))
+strong = lw.model("anthropic/claude-sonnet-5-5",
+                  api_key=lw.secret(store="env", name="ANTHROPIC_API_KEY"),
+                  fallback=fast)
+local = lw.model("openai_compatible/qwen3",
+                 base_url="https://models.example.com/v1",
+                 public_only=True)
+
+# Call them, with tags for attribution.
+with lw.tags(request="q-1842", customer="acme"):
+    better = fast.complete(system="Rewrite the question.", user=q, tags={"step": "rewrite"})
+    ranking = strong.complete(system=..., user=..., schema=Ranking, tags={"step": "rerank"})
+    for chunk in strong.stream(system=..., user=..., tags={"step": "answer"}):
+        print(chunk.text, end="")
+
+lw.report(group_by=["customer", "step"])
+```
+
+## The model
+
+`lw.model(name, *, api_key=None, base_url=None, public_only=False, params=None, price=None, retry=None, fallback=None, backend=None)`
+
+| Argument | Meaning |
+|---|---|
+| `name` | `provider/model`, for example `openai/gpt-5.4` or `groq/llama-3.3-70b-versatile`. llmwarden owns this format, and each backend translates it. It matches LiteLLM's, so that backend passes it straight through. |
+| `api_key` | A plain string, a function that returns a string, or `lw.secret(...)`. Omitted: the provider's standard variable through `env`, such as `OPENAI_API_KEY`. |
+| `base_url` | Optional. Any OpenAI-compatible server. Checked by the endpoint guard. |
+| `public_only` | Turns the endpoint guard on. For hosted apps that strangers use. |
+| `params` | Default model parameters: `temperature`, `max_tokens` and so on. Any call can override them. |
+| `price` | Optional price per million input and output tokens, for this model only. |
+| `retry` | Optional retry policy (see Retries). |
+| `fallback` | Optional model to move to after the retries fail. |
+| `backend` | Optional backend adapter. Default: `LiteLLMBackend()`. |
+
+**Creating a model** checks the name against the backend's providers, resolves the key, runs the endpoint guard and builds the client. A model that cannot work fails here, at startup, not during a request.
+
+**Caching.** Models are cached by name, key source, base URL and backend. Calling `lw.model(...)` again with the same arguments returns the cached model, with no new key fetch and no new client. The key source is compared by reference (the store, name and field), never by the key's value.
+
+**Rotation.**
+- `model.refresh()` fetches the key again and rebuilds the client.
+- `lw.clear_cache()` drops every cached model and key.
+- `lw.secret(..., ttl=3600)` re-fetches the key after an hour, on the next call.
+- **Automatic:** if a call fails with an authentication error and the key came from a store or a function, llmwarden fetches the key once more and retries once. A rotated key then works without a restart. A plain-string key is never retried this way.
+
+## Secret stores
+
+`lw.secret(store, name, field=None, ttl=None)`
+
+| Store | `name` | Example |
+|---|---|---|
+| `env` (built in) | The environment variable | `lw.secret("env", "GROQ_API_KEY")` |
+| `aws` (Secrets Manager) | The secret's name or ARN | `lw.secret("aws", "prod/llm", field="groq_key")` |
+| `azure` (Key Vault) | The secret's name in the vault | `lw.secret("azure", "groq-api-key")` |
+| `vault` (HashiCorp) | The path to the secret | `lw.secret("vault", "secret/data/llm/groq", field="key")` |
+| `gcp` (Secret Manager) | The secret's name, optionally with a version | `lw.secret("gcp", "groq-key/versions/latest")` |
+
+- `field` picks one value when the secret holds JSON with several.
+- Where a store lives (its region, vault URL, address or token) is set once, when it is registered with `lw.secrets.use(...)`. Each `lw.secret(...)` then only names the secret.
+- `env` needs no setup and can read a `.env` file if given one.
+- `aws`, `azure`, `vault` and `gcp` ship as extras, so their SDKs are installed only when used.
+- A store of your own is one class:
+
+```python
+class SecretStore(Protocol):
+    id: str
+    def get(self, name: str) -> str: ...
+```
+
+- A `lw.secret(...)` is an explicit object, never a `"${...}"` string, so a real key can never be mistaken for a reference.
+- Fetched keys are held in memory only, never written to disk, logs or errors.
+
+**Why not LiteLLM's.** LiteLLM has secret manager integrations, but in its SDK they do not fit: Google, HashiCorp and CyberArk need its enterprise licence, the Azure Key Vault loader lives in its proxy, the AWS one works through global state, and `os.environ/` references are read only in Router config.
+
+## The backend facade
+
+Every model calls through one **backend adapter**, which wraps a provider library.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryTextColor':'#000000','primaryBorderColor':'#000000','lineColor':'#000000','secondaryColor':'#ffffff','tertiaryColor':'#ffffff','clusterBkg':'#ffffff','clusterBorder':'#000000'}}}%%
 flowchart TB
-    App["Application stage<br/>(rewrite, rerank, answer, planner...)"]
+    App["Application code<br/>(its own steps, agents, pipelines)"]
     subgraph Warden["llmwarden"]
-        Face["Warden<br/>complete, stream, embed, run"]
-        Stages["Stage settings"]
-        Secrets["Secret resolver"]
+        Model["lw.model(...)<br/>complete, stream, embed"]
+        Cache["Model cache"]
+        Secrets["Secret stores"]
         Guard["Endpoint guard"]
         Retry["Retry loop"]
         Hygiene["Key hygiene"]
-        Ledger["Cost ledger"]
+        Obs["Attempt records<br/>tags, OpenTelemetry, report"]
         Own["Fallback capabilities<br/>prices, schema parsing, error kinds"]
     end
     subgraph Adapters["Backend adapters"]
@@ -43,18 +129,17 @@ flowchart TB
         OAI["OpenAIBackend (light)"]
         Yours["your adapter"]
     end
-    App --> Face
-    Face --> Stages
-    Stages --> Secrets
-    Face --> Guard
-    Face --> Retry
+    App --> Model
+    Model --> Cache
+    Cache --> Secrets
+    Cache --> Guard
+    Model --> Retry
     Retry --> Lite
     Retry --> OAI
     Retry --> Yours
     Retry --> Hygiene
-    Hygiene --> Ledger
+    Hygiene --> Obs
     Own -.used when an adapter lacks a capability.-> Retry
-    Ledger --> App
 ```
 
 ### The adapter interface
@@ -81,14 +166,9 @@ class Backend(Protocol):
     def price(self, reply: ChatReply | EmbedReply) -> Cost | None: ...   # used only if capabilities.prices
 ```
 
-- `CallContext` carries what llmwarden resolved for this call: the key, the base URL, and, when the endpoint guard is on, the httpx client to use.
+- `CallContext` carries what llmwarden resolved: the key, the base URL, and, when the endpoint guard is on, the httpx client to use.
 - Async versions (`acomplete`, `astream`, `aembed`) follow the same pattern.
-- Every adapter is built with its own **constructor**, which takes that library's options, so an application can tune the library without llmwarden knowing about every option:
-
-```python
-warden = Warden.from_yaml("models.yaml", backend=LiteLLMBackend(drop_params=False))
-warden = Warden.from_yaml("models.yaml", backend=OpenAIBackend(timeout=30))
-```
+- Every adapter has its own **constructor**, which takes that library's options, so an application can tune the library without llmwarden knowing every option: `LiteLLMBackend(drop_params=False)`, `OpenAIBackend(timeout=30)`.
 
 ### The rule: use the backend's, else ours
 
@@ -98,60 +178,20 @@ For each capability, llmwarden asks the adapter first. If the adapter's library 
 |---|---|---|---|
 | Reach many providers | **Uses LiteLLM** (165 providers, `provider/model` names, `get_llm_provider`) | One: any OpenAI-compatible server | Nothing |
 | Per-call key and base URL | **Uses LiteLLM** (`api_key`, `api_base` per call) | **Uses the SDK** (`api_key`, `base_url` on the client) | Nothing |
-| Error kinds | **Uses LiteLLM's mapping** (every provider error mapped to one set, such as `RateLimitError` and `Timeout`), translated to ours with a small table | Maps the SDK's exception classes | The `ErrorKind` list the retry policy reads |
-| Price of a call | **Uses LiteLLM** (`response_cost`, `completion_cost`, embeddings too) | None | A price table, used when the adapter has none or a stage sets its own price |
+| Error kinds | **Uses LiteLLM's mapping** (every provider's errors mapped to one set, such as `RateLimitError` and `Timeout`), translated to ours with a small table | Maps the SDK's exception classes | The `ErrorKind` list the retry policy reads |
+| Price of a call | **Uses LiteLLM** (`response_cost`, `completion_cost`, embeddings too) | None | A price table, used when the adapter has none or a model sets its own price |
 | Schema-shaped JSON from the provider | **Uses LiteLLM** (`response_format` takes a Pydantic class; `supports_response_schema`) | **Uses the SDK** (`chat.completions.parse` returns a parsed object) | Validation into the Pydantic class, always; a schema in the prompt for providers without support |
 | Usage at the end of a stream | **Uses LiteLLM**, with `include_usage` always sent | **Uses the SDK** (`stream_options={"include_usage": True}`) | A flag when tokens were estimated, not reported |
 | Injected HTTP client | **Uses LiteLLM** (`client=` per call; works on the OpenAI and Anthropic paths, other providers to be tested one by one) | **Uses the SDK** (`http_client=`) | The guarded client itself |
 | Retries | Not used: LiteLLM's retries hide failed attempts (see Retries) | Not used: turned off with `max_retries=0` | The retry loop |
-| Secret stores | Not used: LiteLLM's are bound to its proxy, need an enterprise licence, or are global | n/a | The secret resolver |
+| Secret stores | Not used (see Secret stores) | n/a | The secret stores |
 | Guard for custom endpoints | Not used: LiteLLM checks `api_base` only in its proxy | n/a | The endpoint guard |
 | Key scrubbing | Not enough: LiteLLM callbacks receive the raw key | Not enough: SDK errors hold the key in `request.headers` | Key hygiene |
-| Cost per run, per attempt | Not available in the SDK | n/a | The cost ledger |
+| Attempt records and tags | LiteLLM callbacks miss retried attempts and carry the raw key | n/a | Records, tags, OpenTelemetry spans and reports |
 
-## Components
+## Endpoint guard
 
-### Stage settings
-
-Loaded from YAML or built in Python. Each stage has:
-
-| Field | Meaning |
-|---|---|
-| `model` | `provider/model`, for example `openai/gpt-5.4` or `groq/llama-3.3-70b-versatile`. llmwarden owns this format, and each adapter translates it. It matches LiteLLM's, so that adapter passes it straight through. |
-| `api_key` | A secret reference such as `${env:GROQ_KEY}`. A literal key is allowed for local use and is masked when printed. |
-| `base_url` | Optional. Any OpenAI-compatible server. Checked by the endpoint guard. |
-| `params` | Optional model parameters: `temperature`, `max_tokens` and so on. |
-| `price` | Optional price per million input and output tokens. Applied to this stage only. |
-| `retry` | Optional retry policy (see Retries). |
-| `fallback` | Optional model to move to after a failure. |
-
-A stage with no entry, or an empty one, uses `default`. A stage that names no key uses the provider's standard variable through `env`, such as `OPENAI_API_KEY`.
-
-When the settings load, each stage's provider is checked against the adapter's `capabilities.providers`. An unsupported provider fails then, not halfway through a run.
-
-Settings are frozen once built. Changing them builds a new `Warden`, so a run in progress never mixes two sets of settings.
-
-### Secret resolver
-
-A reference has the form `${provider:path}`. The resolver looks up the provider by id and asks it for the value.
-
-```python
-class SecretProvider(Protocol):
-    id: str
-    def get(self, path: str) -> str: ...
-```
-
-- `env` is built in and reserved. It reads the process environment and, if given, a `.env` file.
-- `aws`, `azure`, `vault` and `gcp` ship as extras, so their SDKs are installed only when used.
-- An application registers its own with `warden.secrets.register(MyProvider())`.
-
-**Why not LiteLLM's.** LiteLLM has secret manager integrations, but in the SDK they do not fit: Google, HashiCorp and CyberArk need its enterprise licence, the Azure Key Vault loader lives in the proxy, the AWS one works through global state, and `os.environ/` references are read only in Router config.
-
-Values are resolved lazily, when a stage is first called, and held in memory for a configurable time (default: the life of the process). They are never cached to disk.
-
-### Endpoint guard
-
-Runs before any call, whenever a stage has a `base_url` and `public_only` is on.
+Runs when a model is created with a `base_url` and `public_only=True`, and again on every call.
 
 1. The scheme must be `https`.
 2. The URL must have no user info, no fragment and no query string.
@@ -159,53 +199,49 @@ Runs before any call, whenever a stage has a `base_url` and `public_only` is on.
 4. llmwarden builds an httpx client with **redirects off** and a transport that connects only to the address it checked, while keeping the real host name for TLS and the `Host` header. A DNS change between check and call cannot reach a private address.
 5. That client is handed to the adapter through `CallContext`. LiteLLM takes it as `client=` and the openai SDK as `http_client=`. LiteLLM's async default transport is aiohttp, so the LiteLLM adapter sets `disable_aiohttp_transport` to keep the call on the guarded httpx client.
 
-An adapter whose `capabilities.http_client` is false cannot pin the address. With `public_only` on, llmwarden refuses custom endpoints on that adapter rather than run them unguarded.
+An adapter whose `capabilities.http_client` is false cannot pin the address. With `public_only=True`, llmwarden refuses custom endpoints on that adapter rather than run them unguarded.
 
 **Why not LiteLLM's.** LiteLLM's SDK never checks `api_base`. Its proxy does, and its `validate_url` helper guards image and file URLs. That helper is a useful reference, but it rewrites the URL to the IP, which breaks TLS host checks for https, so llmwarden pins the address in the transport instead.
 
 With `public_only` off, as on a developer's own machine, local servers such as Ollama on `localhost` work.
 
-### Key hygiene
+## Key hygiene
 
-- The resolved key goes to the adapter call and nowhere else. It is not stored on the stage settings.
+- The resolved key goes to the adapter call and nowhere else.
 - Any exception from the adapter is caught, its message scrubbed of the key, and re-raised as `ProviderError` with `from None`. The original is dropped because it can hold the key: the openai SDK's errors keep the real request, with the key in `request.headers`.
-- llmwarden never registers LiteLLM callbacks and never passes their arguments on, because LiteLLM hands callbacks the raw key. Applications get llmwarden's own events and ledger records, which hold no key.
-- `repr` and `str` of settings mask literal keys and show references as written.
-- A logging filter is provided that scrubs any resolved secret from log records.
+- llmwarden never registers LiteLLM callbacks and never passes their arguments on, because LiteLLM hands callbacks the raw key. Applications get llmwarden's own records and spans, which hold no key.
+- `repr` and `str` of a model mask the key and show a secret reference as its store and name.
+- A logging filter is provided that scrubs any fetched key from log records.
 
-### Structured output
-
-`complete` takes an optional Pydantic class and returns a validated instance of it:
+## Structured output
 
 ```python
 class Ranking(BaseModel):
     order: list[int]
 
-reply = warden.complete("rerank", system=..., user=..., schema=Ranking)
+reply = strong.complete(system=..., user=..., schema=Ranking)
 reply.parsed      # a Ranking
 reply.text        # the raw JSON the model returned
 ```
 
 - If the adapter has `capabilities.schema`, the schema goes to the provider: LiteLLM's `response_format` takes the Pydantic class, and the openai SDK's `chat.completions.parse` takes it too.
-- **llmwarden always validates the reply itself** with `model_validate_json`. LiteLLM returns a JSON string, not an object, and for a provider without schema support it either raises or, with `drop_params=True`, silently drops the schema. The LiteLLM adapter therefore never sets `drop_params`. For such providers, llmwarden describes the schema in the prompt instead.
+- **llmwarden always validates the reply itself** with `model_validate_json`. LiteLLM returns a JSON string, not an object. For a provider without schema support, LiteLLM either raises or, with `drop_params=True`, silently drops the schema, so the LiteLLM adapter never sets `drop_params`. For such providers, llmwarden describes the schema in the prompt instead.
 - A reply that fails validation can be retried. If every attempt fails, `complete` raises `InvalidOutput` with the last raw text attached.
 
-### Streaming
-
-`stream` is a separate method, so `complete` stays simple:
+## Streaming
 
 ```python
-for chunk in warden.stream("answer", system=..., user=...):
+for chunk in strong.stream(system=..., user=...):
     print(chunk.text, end="")
 reply = chunk.final   # on the last chunk: full text, usage and cost
 ```
 
 - Async: `astream`.
 - `include_usage` is always sent. LiteLLM adds it on its own only for OpenAI's own endpoint, not for a custom base URL.
-- When a provider reports no usage, LiteLLM estimates the tokens. llmwarden marks such usage as `estimated`, so the ledger never presents a guess as a count.
+- When a provider reports no usage, LiteLLM estimates the tokens. llmwarden marks such usage as `estimated`, so a record never presents a guess as a count.
 - `schema` is not accepted with `stream`. Structured output is validated on the whole reply.
 
-### Retries
+## Retries
 
 llmwarden runs retries itself, and the adapters turn every hidden retry off, so **every attempt is seen and recorded**. LiteLLM's own retries cannot be used for this:
 
@@ -215,46 +251,62 @@ llmwarden runs retries itself, and the adapters turn every hidden retry off, so 
 
 LiteLLM's Router does report each attempt, but it brings a large amount of machinery (deployments, cooldowns, caches) for one feature. A small loop is simpler.
 
-Each stage has a retry policy: how many attempts, which `ErrorKind`s to retry (rate limit, timeout, server error, invalid output), and the wait between attempts. A retry can also move to the stage's `fallback` model.
+A retry policy says how many attempts, which `ErrorKind`s to retry (rate limit, timeout, server error, invalid output), and the wait between attempts. When the retries run out, a model with a `fallback` moves to that model, which has its own key, endpoint and retry policy.
 
-### Cost ledger
+## Observability
+
+### Tags
+
+```python
+with lw.tags(request="q-1842", customer="acme"):
+    plan = planner.complete(..., tags={"agent": "planner"})
+```
+
+- `lw.tags(...)` sets tags for everything inside it, however deep, through a context variable, so it works across function calls, threads started inside it, and async tasks.
+- Per-call `tags=` add to them, and win on a clash.
+- Tags are plain strings. llmwarden gives no tag a special meaning.
+
+### Attempt records
 
 Every attempt is one record:
 
 | Field | Meaning |
 |---|---|
-| `run_id` | The application's own id for one unit of work, such as one question answered |
-| `stage` | The stage name |
+| `id`, `call_id` | This attempt, and the call it belongs to |
+| `model`, `provider` | The model actually called, which differs from the one asked for after a fallback |
 | `attempt` | 1 for the first try, 2 for the first retry, and so on |
-| `model` | The model actually called, which differs from the stage's on a fallback |
 | `outcome` | `ok`, `provider_error`, `invalid_output` or `cancelled` |
+| `error_kind` | On failure: `rate_limit`, `timeout`, `auth`, `server`, `bad_request` and so on |
 | `input_tokens`, `output_tokens` | As reported, or `None` |
 | `usage_source` | `reported` or `estimated` |
 | `cost` | From the price source, or `None` when a count or price is unknown |
-| `price_source` | `stage`, `backend` or `llmwarden` |
-| `seconds` | Wall-clock time of the attempt |
+| `price_source` | `model`, `backend` or `llmwarden` |
+| `started`, `seconds` | When the attempt started, and how long it took |
+| `tags` | All tags in effect |
 
-An application groups attempts into a run:
+Records are handed to every registered sink. Three ship with llmwarden:
+
+- **OpenTelemetry.** One span per attempt, using the OpenTelemetry GenAI attribute names (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and so on), with llmwarden's fields and the tags as further attributes. Any OpenTelemetry tool can then show them. The GenAI conventions are still marked as in development, so the attribute names are pinned to one version and listed in the docs. Installed as `llmwarden[otel]`.
+- **In memory.** Keeps the latest records, with a size limit, for `lw.report`.
+- **A function.** `lw.observe.add(my_sink)` calls your function with each record, for your own database, log or billing system.
+
+### Reports
 
 ```python
-with warden.run(run_id="q-1842") as run:
-    answer_question(...)          # every stage call inside is recorded
-run.succeeded()                   # the application says whether the run met its goal
-
-run.cost()
-# total:     0.0213
-# useful:    0.0181   attempts whose outcome was ok
-# wasted:    0.0032   failed attempts that still used tokens
-# unknown:   1 attempt with no usage reported
-# by stage:  rewrite 0.0009, rerank 0.0047, answer 0.0157
+lw.report(group_by=["customer", "agent"], since=...)
 ```
 
-- **Failed attempts are counted.** A rate-limit or connection error usually returns no usage and costs nothing, so it shows as unknown, not zero. A reply that came back but failed validation did use tokens, and its cost is counted as wasted.
-- **Success is the application's call.** llmwarden knows whether each call returned something valid. Only the application knows whether the run did its job, so it marks that with `run.succeeded()` or `run.failed(reason)`.
-- **Storage is the application's call too.** The ledger is in memory. `run.records()` returns the rows, and an optional sink receives each one as it is written.
+For each group: calls, attempts, failures by `error_kind`, tokens, total cost, cost wasted on failed attempts that still used tokens, attempts whose cost is unknown, and time. It reads the in-memory sink. Anything larger belongs in an OpenTelemetry tool.
 
-**Prices, in order:**
-1. The stage's own `price`, applied by llmwarden to that stage only. It is never registered in LiteLLM, because LiteLLM's per-call prices are stored globally and leak into later calls to the same model.
+### Privacy
+
+- Prompts and replies are not recorded unless `lw.observe.capture_content(True)` is set.
+- Keys are never recorded, in any mode.
+
+### Prices
+
+In this order:
+1. The model's own `price`, applied by llmwarden to that model only. It is never registered in LiteLLM, because LiteLLM's per-call prices are stored globally and leak into later calls to the same model.
 2. The adapter's price, when it has one. For LiteLLM, `response_cost`. It is `None` for a model LiteLLM does not know, and llmwarden keeps it as unknown.
 3. llmwarden's own table, for adapters without prices. It starts as a copy of LiteLLM's price file (MIT), with credit and the date it was taken.
 
@@ -266,61 +318,63 @@ The LiteLLM adapter sets `LITELLM_LOCAL_MODEL_COST_MAP=True`, so LiteLLM uses th
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryTextColor':'#000000','primaryBorderColor':'#000000','lineColor':'#000000','actorBkg':'#ffffff','actorBorder':'#000000','actorTextColor':'#000000','signalColor':'#000000','signalTextColor':'#000000','noteBkgColor':'#ffffff','noteBorderColor':'#000000'}}}%%
 sequenceDiagram
     participant A as Application
-    participant W as Warden
-    participant S as Secret resolver
-    participant G as Endpoint guard
+    participant M as Model (cached)
     participant B as Backend adapter
-    A->>W: complete("rewrite", system, user)
-    W->>W: settings for "rewrite", else "default"
-    W->>S: resolve ${aws:prod/groq-key}
-    S-->>W: key (held in memory)
-    W->>G: check base_url (when public_only)
-    G-->>W: guarded httpx client, or refused
-    loop each attempt, under the stage's retry policy
-        W->>B: complete(request, key, base_url, client)
-        B-->>W: reply and usage, or an error kind
-        W->>W: scrub the key from any error, record the attempt
+    participant S as Secret store
+    participant O as Sinks (OpenTelemetry, memory, yours)
+    Note over A,M: created once: key fetched, endpoint checked, client built
+    A->>M: complete(system, user, tags)
+    loop each attempt, under the retry policy
+        M->>B: complete(request, key, base_url, guarded client)
+        B-->>M: reply and usage, or an error kind
+        opt auth error and the key came from a store
+            M->>S: fetch the key again, retry once
+        end
+        M->>M: scrub the key from any error, price the attempt
+        M->>O: attempt record with tags
     end
-    W-->>A: ChatReply (text or parsed object, usage, cost)
+    M-->>A: reply (text or parsed object, usage, cost)
 ```
 
 ## Swapping the backend
 
-The interface is kept small so that a new adapter is one file. Six things are kept on llmwarden's side, so a swap does not leak:
+The interface is kept small so that a new adapter is one file. Six things stay on llmwarden's side, so a swap does not leak:
 
 1. **Model names.** llmwarden owns `provider/model`, and each adapter translates it.
 2. **Prices.** llmwarden owns the price order above, so an adapter without prices still gets costs.
-3. **Errors.** Each adapter maps its library's exceptions to `ErrorKind`. The retry policy reads only `ErrorKind`.
-4. **Provider coverage.** Each adapter declares its providers, and the settings are checked against them on load.
+3. **Errors.** Each adapter maps its library's exceptions to `ErrorKind`. Retries and records read only `ErrorKind`.
+4. **Provider coverage.** Each adapter declares its providers, and `lw.model(...)` checks against them.
 5. **The guarded HTTP client.** llmwarden builds it, and the adapter only accepts it. An adapter that cannot accept one gets no custom endpoints under `public_only`.
 6. **Provider-specific features.** Some features, such as Claude's native citations, need request shapes a general adapter does not pass. These go through one marked escape hatch (see Open questions), so the normal path stays swappable.
 
 **Two adapters from the first version.** `LiteLLMBackend` is the default. `OpenAIBackend` is a light adapter for any OpenAI-compatible server, built on the official `openai` SDK, for people who do not want LiteLLM's dependencies. The same contract tests run against both. With only one adapter, the interface would quietly come to depend on it.
 
-**Writing your own adapter.** Implement `Backend`, declare its `Capabilities`, and pass it to `Warden`. Run llmwarden's contract test suite against it. Anything your library does not provide, leave out of `Capabilities`, and llmwarden supplies its own.
+**Writing your own adapter.** Implement `Backend`, declare its `Capabilities`, and pass it as `backend=`. Run llmwarden's contract test suite against it. Anything your library does not provide, leave out of `Capabilities`, and llmwarden supplies its own.
 
 ## Threats and how they are handled
 
 | Threat | Handling |
 |---|---|
-| A key committed in a config file | Configs hold references. Literal keys are allowed only for local use and are masked when printed. |
+| A key written into code or config | Keys can come from a store or a function. A plain-string key works for local use, and is masked when a model is printed. |
 | A user-supplied base URL reaches an internal service | Endpoint guard with `public_only`: https, public addresses only, the checked address pinned in the transport, no redirects. |
 | A key appears in a traceback or log | Errors re-raised scrubbed with the original dropped, since SDK errors hold the request headers; logging filter. |
-| A key reaches an application hook | LiteLLM callbacks are never registered or forwarded. llmwarden's events carry no key. |
-| A key sent to the wrong server | The key goes only to its own stage's call. A custom endpoint with no key gets a placeholder, so an SDK never falls back to an environment key and sends it elsewhere. |
+| A key reaches an application hook | LiteLLM callbacks are never registered or forwarded. llmwarden's records and spans carry no key. |
+| A key sent to the wrong server | The key goes only to its own model's call. A custom endpoint with no key gets a placeholder, so an SDK never falls back to an environment key and sends it elsewhere. |
+| A rotated key breaks a running app | One automatic re-fetch on an auth error, `refresh()`, and `ttl`. |
 | Hidden retries cost money no report shows | Every library retry turned off; llmwarden's loop records each attempt. |
+| Prompts with personal data end up in traces | Content is not recorded unless turned on. |
 | A compromised or changed backend release | The backend is an extra pinned to an exact version and can be swapped. LiteLLM's price file is read from the package, not downloaded at import. |
 
 ## How the first two projects adopt it
 
-- **RAG Playground (Pandion).** The rewrite, rerank and answer steps call `warden.complete` with their step name. Pandion's own provider list, key handling and endpoint guard are removed. Embedding can then use API models, not only local ones.
-- **nl2sql.** Each agent maps to a stage. Its secret providers move into llmwarden. Because nl2sql runs on LangChain, llmwarden ships a small adapter, `llmwarden[langchain]`, that returns a LangChain chat model for a stage.
+- **RAG Playground (Pandion).** Each LLM step builds its model with `lw.model(...)` from its own settings, and tags its calls with the step and run. Pandion's own provider list, key handling and endpoint guard are removed, and its Speed and cost feature reads llmwarden's records. Embedding can then use API models, not only local ones.
+- **nl2sql.** Each agent builds its model from nl2sql's existing config. Its secret providers move into llmwarden stores. Because nl2sql runs on LangChain, llmwarden ships a small adapter, `llmwarden[langchain]`, that wraps a model as a LangChain chat model, keeping llmwarden's records and tags.
 
 ## Open questions
 
-1. **Provider-specific features.** Should a stage be able to ask for the raw provider client, with the key still resolved and the endpoint still guarded? This is what Claude's native citations would need.
-2. **First version scope.** Sync `complete` with `schema` and the cost ledger first, then `stream` and the async methods? Or all four together?
-3. **Secret cache lifetime.** Is the life of the process the right default, or should keys expire, for rotation?
+1. **Provider-specific features.** Should a model be able to hand out the raw provider client, with the key still resolved and the endpoint still guarded? This is what Claude's native citations would need.
+2. **First version scope.** `complete` with `schema`, records, tags and the in-memory report first, then `stream`, async, and the OpenTelemetry sink? Or all together?
+3. **Default key lifetime.** No `ttl` (keep until `refresh()` or an auth error) as the default, or a default `ttl`?
 
 ## Evidence
 
