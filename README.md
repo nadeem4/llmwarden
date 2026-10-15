@@ -2,7 +2,7 @@
 
 Call any model with any key, fetched safely from wherever you keep secrets, and see exactly where your money goes and which requests fail.
 
-> **Status: design approved, implementation in progress.** There is no working code yet. This README describes what the package will do. The design is in [docs/architecture.md](docs/architecture.md) and the working rules in [docs/contributing.md](docs/contributing.md).
+> **Status: 0.1.0 in development.** The core, the three backends, the five secret stores, the endpoint guard, key hygiene, recorded retries, tags, reports and the OpenTelemetry sink are implemented and covered by a contract test suite that runs the same scenarios against every backend. Not on PyPI yet. The design is in [docs/architecture.md](docs/architecture.md), the working rules in [docs/contributing.md](docs/contributing.md), and what shipped in [CHANGELOG.md](CHANGELOG.md).
 
 ## The problem
 
@@ -117,8 +117,17 @@ Python 3.12 or newer.
 
 Anyone shipping an application with more than one model call, especially one that is hosted for other people. It starts as the shared layer for two projects, [RAG Playground](https://github.com/nadeem4/rag-playground) and [nl2sql](https://github.com/nadeem4/nl2sql), which each built their own version of it.
 
-## Status and next steps
+## Developing
 
-1. Build version one in the order given in [docs/architecture.md](docs/architecture.md#build-order).
-2. Release 0.1.0 to PyPI.
-3. Move RAG Playground's Pandion package onto it, then nl2sql.
+```
+uv sync --group dev
+uv run pytest
+```
+
+Every test runs without a network connection. See [docs/contributing.md](docs/contributing.md).
+
+## Next steps
+
+1. Release 0.1.0 to PyPI.
+2. Move RAG Playground's Pandion package onto it, then nl2sql.
+3. Streaming, async and tool calling, as additions to the same interface.
