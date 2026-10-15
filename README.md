@@ -2,7 +2,7 @@
 
 Call any model with any key, fetched safely from wherever you keep secrets, and see exactly where your money goes and which requests fail.
 
-> **Status: proposal.** There is no code yet. This README describes what the package will do, so the design can be reviewed before it is built. The design is in [docs/architecture.md](docs/architecture.md).
+> **Status: design approved, implementation in progress.** There is no working code yet. This README describes what the package will do. The design is in [docs/architecture.md](docs/architecture.md) and the working rules in [docs/contributing.md](docs/contributing.md).
 
 ## The problem
 
@@ -26,14 +26,14 @@ Every project ends up rewriting the same layer. llmwarden is that layer, written
 import llmwarden as lw
 
 fast = lw.model("groq/llama-3.3-70b-versatile",
-                api_key=lw.secret(store="aws", name="prod/llm", field="groq_key"))
+                api_key=lw.secret("aws", "prod/llm", field="groq_key"))
 strong = lw.model("anthropic/claude-sonnet-5-5",
-                  api_key=lw.secret(store="env", name="ANTHROPIC_API_KEY"))
+                  api_key=lw.secret("env", "ANTHROPIC_API_KEY"))
 
 reply = fast.complete(system="Rewrite the question.", user=question)
 ```
 
-No config file. Create a model in code, give it a key, call it. The key is fetched once and the client is cached, so creating the same model again costs nothing.
+No config file. Create a model in code, give it a key, call it. A model is cheap to create, so a hosted app can build one per request with the end user's own key.
 
 ### 2. Secrets from any store, and rotation that just works
 
@@ -74,18 +74,44 @@ lw.report(group_by=["customer", "agent"])
 - **Reports** add up cost, tokens, failures and time by any tag: per customer, per feature, per agent, per request.
 - **OpenTelemetry** spans are emitted for every attempt, using the standard GenAI attribute names, so Grafana, Jaeger, Langfuse, Phoenix, Datadog or any other OpenTelemetry tool can show them with no extra code.
 - Unknown prices and token counts are reported as unknown, never as zero.
-- Prompts and replies are not recorded unless you turn that on. Keys never are.
+- Prompts and replies are never recorded. Keys never are.
 
-### 6. Structured output and streaming, the same everywhere
+### 6. Structured output, the same everywhere
 
-Pass a Pydantic class and get back a validated object, on every provider, because llmwarden validates the reply itself. Stream a reply and still get its usage and cost at the end. Async versions of every call are included.
+Pass a Pydantic class and get back a validated object, on every provider, because llmwarden validates the reply itself. A reply that fails validation is retried like any other failure, and recorded.
+
+### 7. Swappable backends
+
+Three backends ship in the first version, and the same contract test suite runs against each:
+
+| Backend | Reaches | Install |
+|---|---|---|
+| `OpenAIBackend` | OpenAI, OpenRouter, Ollama, vLLM, any OpenAI-compatible server | `llmwarden[openai]` |
+| `AnthropicBackend` | Anthropic, with beta features passed through | `llmwarden[anthropic]` |
+| `LiteLLMBackend` | everything LiteLLM lists | `llmwarden[litellm]` |
+
+The provider in the model name picks the backend. Pass `backend=` to override it, or write your own adapter in one file. Retries, records, scrubbing, schema validation and pricing live in llmwarden, so every backend behaves the same.
 
 ## What it is not
 
-- **Not another provider client.** Calls go through an existing provider library behind one small interface. Wherever that library already does something well, such as mapping errors or pricing a call, llmwarden uses it, and fills in only what is missing. Two backends ship from the start: a full multi-provider one, and a light one for any OpenAI-compatible server. You can write your own in one file.
+- **Not another provider client.** Calls go through an existing library behind one small interface. Wherever that library already does something well, llmwarden uses it, and fills in only what is missing.
 - **Not a framework.** It does not know about your stages, agents or pipelines. Your code decides which model each part uses.
 - **Not a proxy or gateway server.** It is a library inside your application.
 - **Not a dashboard.** It emits OpenTelemetry, which the tools you already use can show.
+
+## Not yet
+
+Streaming, async calls, embeddings and tool calling come after the first release, as additions to the same interface.
+
+## Install
+
+```
+pip install "llmwarden[openai]"          # one backend
+pip install "llmwarden[anthropic,aws]"   # a backend and a secret store
+pip install "llmwarden[all]"             # everything
+```
+
+Python 3.12 or newer.
 
 ## Who it is for
 
@@ -93,7 +119,6 @@ Anyone shipping an application with more than one model call, especially one tha
 
 ## Status and next steps
 
-1. Review this proposal and the [architecture](docs/architecture.md).
-2. Build the core: models with keys and caching, the `env` store, the endpoint guard, key hygiene, retries, records and tags, and both backends.
+1. Build version one in the order given in [docs/architecture.md](docs/architecture.md#build-order).
+2. Release 0.1.0 to PyPI.
 3. Move RAG Playground's Pandion package onto it, then nl2sql.
-4. Add the cloud secret stores, OpenTelemetry spans and reports.

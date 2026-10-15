@@ -1,0 +1,80 @@
+[project]
+name = "llmwarden"
+version = "0.1.0.dev0"
+description = "Call any model with any key, fetched safely from wherever you keep secrets, and see exactly where your money goes"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Nadeem Khan" }]
+requires-python = ">=3.12"
+keywords = ["llm", "openai", "anthropic", "litellm", "secrets", "observability", "cost", "opentelemetry"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security",
+]
+# The base install stays small: the core types, the retry loop, hygiene,
+# records and the env store need only these two.
+dependencies = ["pydantic>=2.9", "httpx>=0.27"]
+
+# Backends and secret stores are extras, so a project installs only the SDKs
+# it uses. A model whose extra is missing raises ProviderUnavailable naming it.
+[project.optional-dependencies]
+openai = ["openai>=3.17.0"]
+anthropic = ["anthropic>=1.7.0"]
+litellm = ["litellm>=1.105.0"]
+aws = ["boto3>=1.35"]
+azure = ["azure-identity>=1.17", "azure-keyvault-secrets>=4.8"]
+gcp = ["google-cloud-secret-manager>=2.20"]
+vault = ["hvac>=2.3"]
+otel = ["opentelemetry-api>=1.27"]
+dotenv = ["python-dotenv>=1.0"]
+all = [
+    "llmwarden[openai,anthropic,litellm,aws,azure,gcp,vault,otel,dotenv]",
+]
+
+[project.urls]
+Homepage = "https://github.com/nadeem4/llmwarden"
+Repository = "https://github.com/nadeem4/llmwarden"
+Issues = "https://github.com/nadeem4/llmwarden/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "respx>=0.22",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "llmwarden[all]",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llmwarden"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# No test may open a network connection. respx mocks httpx for every backend.
+filterwarnings = ["error::ResourceWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+# S101: assert is how tests assert.
+per-file-ignores = { "tests/**" = ["S101"] }
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["llmwarden"]
+mypy_path = "src"
